@@ -1,0 +1,287 @@
+<!doctype html>
+<!--
+  eZ-Education
+  Single-file HTML/CSS/JS demo chat for anonymous educational discussion (math-friendly)
+
+  Features:
+  - Anonymous usage (no login). Random display name generated; user may edit it.
+  - Rooms (Math, Science, General). Switch rooms to join different topic channels.
+  - Local-only chat using BroadcastChannel (works across tabs in same browser/origin).
+  - Optional WebSocket mode: enter your own WebSocket server URL to enable real multi-user chat.
+  - Markdown support for messages and inline LaTeX rendering (KaTeX) for math.
+  - Message history saved to localStorage per room.
+
+  Note: This is a frontend-only demo. To allow real cross-device chat, host a lightweight WebSocket server
+  (example Node.js ws server) and paste its wss:// or ws:// URL into the "Server URL" field.
+-->
+
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>eZ-Education</title>
+
+  <!-- KaTeX for math rendering -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.4/dist/katex.min.css" integrity="" crossorigin="anonymous">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.4/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.4/dist/contrib/auto-render.min.js"></script>
+
+  <!-- marked for Markdown -->
+  <script defer src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+
+  <style>
+    :root{
+      --bg:#0f1724; --card:#0b1220; --muted:#94a3b8; --accent:#60a5fa;
+      --glass: rgba(255,255,255,0.03);
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;background:linear-gradient(180deg,#071029 0%, #071827 100%);color:#e6eef8;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+    .app{width:100%;max-width:1100px;background:var(--card);border-radius:12px;overflow:hidden;box-shadow:0 8px 30px rgba(2,6,23,0.7);display:grid;grid-template-columns:320px 1fr}
+
+    /* Sidebar */
+    .sidebar{padding:18px;background:linear-gradient(180deg, rgba(255,255,255,0.02), transparent);border-right:1px solid rgba(255,255,255,0.02)}
+    .brand{font-weight:700;font-size:20px;color:var(--accent);display:flex;align-items:center;gap:8px}
+    .brand .dot{width:12px;height:12px;background:var(--accent);border-radius:4px;box-shadow:0 0 18px rgba(96,165,250,0.25)}
+    .muted{color:var(--muted);font-size:13px;margin-top:6px}
+
+    .profile{margin-top:18px}
+    .profile input{width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);background:var(--glass);color:inherit}
+
+    .rooms{margin-top:14px}
+    .room{display:flex;align-items:center;justify-content:space-between;padding:10px;border-radius:8px;cursor:pointer}
+    .room:hover{background:rgba(255,255,255,0.02)}
+    .room.active{background:linear-gradient(90deg, rgba(96,165,250,0.08), rgba(96,165,250,0.02));border:1px solid rgba(96,165,250,0.06)}
+
+    .server-box{margin-top:16px}
+    .server-box input{width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);background:var(--glass);color:inherit}
+    .server-actions{display:flex;gap:8px;margin-top:8px}
+    button{background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01));border:1px solid rgba(255,255,255,0.04);padding:8px 10px;border-radius:8px;color:inherit;cursor:pointer}
+    button.primary{background:linear-gradient(180deg,var(--accent),#2b6cb0);color:#04202a;border:none}
+
+    /* Main */
+    .main{display:flex;flex-direction:column;height:600px}
+    .header{padding:18px;border-bottom:1px solid rgba(255,255,255,0.02);display:flex;align-items:center;justify-content:space-between}
+    .header h2{margin:0}
+    .messages{flex:1;padding:18px;overflow:auto;background:linear-gradient(180deg, rgba(255,255,255,0.01), transparent)}
+    .msg{padding:10px;border-radius:10px;margin-bottom:10px;max-width:80%;word-wrap:break-word}
+    .msg.me{background:linear-gradient(90deg, rgba(96,165,250,0.12), rgba(96,165,250,0.06));margin-left:auto}
+    .msg.other{background:rgba(255,255,255,0.02)}
+    .meta{font-size:12px;color:var(--muted);margin-bottom:6px}
+
+    .composer{padding:12px;border-top:1px solid rgba(255,255,255,0.02);display:flex;gap:8px}
+    .composer textarea{flex:1;min-height:56px;resize:none;padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,0.03);background:transparent;color:inherit}
+    .small{font-size:12px;color:var(--muted)}
+
+    .help{padding:12px;border-top:1px dashed rgba(255,255,255,0.02);font-size:13px;color:var(--muted)}
+
+    @media (max-width:880px){.app{grid-template-columns:1fr} .sidebar{order:2} .main{order:1;height:720px}}
+  </style>
+</head>
+<body>
+  <div class="app" role="application" aria-label="eZ-Education chat">
+    <aside class="sidebar">
+      <div class="brand"><span class="dot"></span>eZ-Education</div>
+      <div class="muted">Anonymous, math-friendly discussion space</div>
+
+      <div class="profile">
+        <label class="small">Display name (optional)</label>
+        <input id="displayName" placeholder="Anonymous123" maxlength="24">
+        <div class="small" style="margin-top:8px">Tip: Use a nickname. No sign-in required.</div>
+      </div>
+
+      <div class="rooms" aria-label="rooms">
+        <div class="small" style="margin-top:12px">Rooms</div>
+        <div class="room" data-room="math">Math</div>
+        <div class="room active" data-room="general">General</div>
+        <div class="room" data-room="science">Science</div>
+        <div class="room" data-room="homework">Homework Help</div>
+      </div>
+
+      <div class="server-box">
+        <div class="small" style="margin-top:12px">Server URL (optional)</div>
+        <input id="serverUrl" placeholder="ws://yourserver.example:8080 or wss://...">
+        <div class="server-actions">
+          <button id="connectBtn">Connect</button>
+          <button id="disconnectBtn">Disconnect</button>
+        </div>
+        <div id="connStatus" class="small" style="margin-top:6px">Not connected (using local tab-only mode)</div>
+      </div>
+
+      <div style="margin-top:14px" class="small">Local mirroring across tabs: enabled</div>
+      <div class="small" style="margin-top:8px">Saved messages are stored locally. To make this public, run a WebSocket server and connect above.</div>
+    </aside>
+
+    <main class="main">
+      <div class="header">
+        <div>
+          <h2 id="roomTitle">Room: General</h2>
+          <div class="small">Share questions, answers, snippets, or math using LaTeX — wrap math with $...$ or $$...$$</div>
+        </div>
+        <div style="text-align:right">
+          <div class="small">Anonymous by design</div>
+          <div class="small" id="userId">ID: --</div>
+        </div>
+      </div>
+
+      <div id="messages" class="messages" aria-live="polite"></div>
+
+      <div class="composer">
+        <textarea id="msgInput" placeholder="Write something... markdown + LaTeX supported (e.g. $E=mc^2$)"></textarea>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <button id="sendBtn" class="primary">Send</button>
+          <button id="clearBtn">Clear room</button>
+        </div>
+      </div>
+
+      <div class="help">
+        Shortcuts: Enter = send, Shift+Enter = new line. Use rooms to organize topics. To have cross-device chat, host a small WebSocket server and paste its URL above.
+      </div>
+    </main>
+  </div>
+
+<script>
+// --- Utilities ---
+function uid(len=6){const s='abcdefghijklmnopqrstuvwxyz0123456789';let r='';for(let i=0;i<len;i++)r+=s[Math.floor(Math.random()*s.length)];return r}
+function nowISO(){return new Date().toISOString()}
+
+// --- App state ---
+const rooms = ['math','general','science','homework']
+let currentRoom = 'general'
+let userId = 'anon-'+uid(4)
+let displayNameEl = document.getElementById('displayName')
+const messagesEl = document.getElementById('messages')
+const roomTitleEl = document.getElementById('roomTitle')
+const userIdEl = document.getElementById('userId')
+const serverUrlEl = document.getElementById('serverUrl')
+const connectBtn = document.getElementById('connectBtn')
+const disconnectBtn = document.getElementById('disconnectBtn')
+const connStatus = document.getElementById('connStatus')
+const msgInput = document.getElementById('msgInput')
+const sendBtn = document.getElementById('sendBtn')
+const clearBtn = document.getElementById('clearBtn')
+
+userIdEl.textContent = 'ID: '+userId
+
+// Rooms UI
+document.querySelectorAll('.room').forEach(el=>{
+  el.addEventListener('click', ()=>{
+    document.querySelectorAll('.room').forEach(r=>r.classList.remove('active'))
+    el.classList.add('active')
+    currentRoom = el.dataset.room
+    roomTitleEl.textContent = 'Room: '+(currentRoom[0].toUpperCase()+currentRoom.slice(1))
+    renderMessages()
+  })
+})
+
+// Local storage helpers
+function storageKey(room){return 'ezedu:room:'+room}
+function loadRoom(room){try{return JSON.parse(localStorage.getItem(storageKey(room))||'[]')}catch(e){return []}}
+function saveRoom(room,arr){localStorage.setItem(storageKey(room),JSON.stringify(arr))}
+
+// Message rendering
+function renderMessages(){messagesEl.innerHTML=''
+  const list = loadRoom(currentRoom)
+  list.forEach(msgObj=>{
+    appendMessageToDOM(msgObj,false)
+  })
+  messagesEl.scrollTop = messagesEl.scrollHeight
+  renderMathInElement(messagesEl, {delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}]})
+}
+
+function sanitizeHtml(s){ // minimal sanitization
+  return s.replace(/</g,'&lt;').replace(/>/g,'&gt;')
+}
+
+function appendMessageToDOM(m, scroll=true){
+  const div = document.createElement('div')
+  div.className = 'msg '+(m.userId===userId? 'me':'other')
+  const meta = document.createElement('div')
+  meta.className='meta'
+  const name = sanitizeHtml(m.displayName||'Anonymous')
+  const time = new Date(m.t||m.ts||nowISO()).toLocaleString()
+  meta.innerHTML = `<strong>${name}</strong> · <span class='small'>${time}</span>`
+  const body = document.createElement('div')
+  // support markdown
+  try{
+    const raw = m.text || ''
+    const md = marked.parseInline ? marked.parseInline(raw) : marked(raw)
+    body.innerHTML = md
+  }catch(e){ body.textContent = m.text }
+  div.appendChild(meta)
+  div.appendChild(body)
+  messagesEl.appendChild(div)
+  if(scroll) messagesEl.scrollTop = messagesEl.scrollHeight
+  // math rendering
+  try{ renderMathInElement(body, {delimiters:[{left:'$$',right:'$$',display:true},{left:'$',right:'$',display:false}], throwOnError:false}) }catch(e){}
+}
+
+// Sending messages
+function makeMessage(text){return {id:Date.now()+'-'+uid(4), userId, displayName: displayNameEl.value.trim()||('Anonymous'+userId.slice(-3)), room:currentRoom, text, ts:nowISO()}}
+
+// BroadcastChannel for local multi-tab
+const bc = new BroadcastChannel('ezedu_channel')
+bc.onmessage = (ev)=>{
+  const m = ev.data
+  if(m && m.type==='message'){
+    const list = loadRoom(m.payload.room)
+    list.push(m.payload)
+    saveRoom(m.payload.room,list)
+    if(m.payload.room===currentRoom) appendMessageToDOM(m.payload)
+  }
+}
+
+// WebSocket support
+let ws = null
+function setStatus(s){connStatus.textContent = s}
+connectBtn.onclick = ()=>{
+  const url = serverUrlEl.value.trim()
+  if(!url){alert('Enter a WebSocket URL (ws:// or wss://) or leave blank to use local tabs only.'); return}
+  try{
+    ws = new WebSocket(url)
+    ws.onopen = ()=>{ setStatus('Connected to '+url) }
+    ws.onmessage = (ev)=>{
+      try{ const obj = JSON.parse(ev.data); if(obj && obj.type==='message'){ handleIncomingMessage(obj.payload) } }catch(e){}
+    }
+    ws.onclose = ()=>{ setStatus('Disconnected') }
+    ws.onerror = ()=>{ setStatus('Connection error') }
+  }catch(e){ alert('Failed to connect: '+e.message) }
+}
+disconnectBtn.onclick = ()=>{ if(ws){ ws.close(); ws=null; setStatus('Disconnected') } }
+
+function handleIncomingMessage(m){ // m is a message object
+  const list = loadRoom(m.room||currentRoom)
+  list.push(m)
+  saveRoom(m.room||currentRoom,list)
+  if((m.room||currentRoom)===currentRoom) appendMessageToDOM(m)
+}
+
+sendBtn.onclick = sendMessage
+msgInput.addEventListener('keydown', (e)=>{ if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); sendMessage() } })
+
+function sendMessage(){const txt = msgInput.value.trim(); if(!txt) return; const m = makeMessage(txt)
+  // save locally
+  const list = loadRoom(currentRoom)
+  list.push(m)
+  saveRoom(currentRoom,list)
+  appendMessageToDOM(m)
+  // broadcast to tabs
+  bc.postMessage({type:'message', payload:m})
+  // send to ws if connected
+  if(ws && ws.readyState===WebSocket.OPEN){ ws.send(JSON.stringify({type:'message', payload:m})) }
+  msgInput.value=''
+}
+
+clearBtn.onclick = ()=>{ if(!confirm('Clear local messages for this room?')) return; localStorage.removeItem(storageKey(currentRoom)); renderMessages(); }
+
+// initial render
+if(!displayNameEl.value) displayNameEl.value = 'Anonymous'+uid(3)
+renderMessages()
+
+// expose for debugging
+window.ez = {loadRoom, saveRoom, renderMessages}
+
+</script>
+</body>
+</html>
